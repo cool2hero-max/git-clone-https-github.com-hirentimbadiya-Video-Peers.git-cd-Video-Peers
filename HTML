@@ -1,1 +1,152 @@
+/*
+Ready-to-deploy Multi-User Video Chat App
+Includes Vercel frontend + Heroku/Render backend configuration
+*/
 
+/* ========================= BACKEND ========================= */
+// backend/server.js
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
+
+const app = express();
+app.use(cors());
+
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: process.env.FRONTEND_URL || '*' }
+});
+
+io.on('connection', socket => {
+  console.log('User connected:', socket.id);
+
+  socket.on('join-room', roomId => {
+    socket.join(roomId);
+    socket.to(roomId).emit('user-connected', socket.id);
+  });
+
+  socket.on('offer', payload => io.to(payload.target).emit('offer', payload));
+  socket.on('answer', payload => io.to(payload.target).emit('answer', payload));
+  socket.on('ice-candidate', payload => io.to(payload.target).emit('ice-candidate', payload.candidate));
+
+  socket.on('chat-message', payload => io.to(payload.roomId).emit('chat-message', payload));
+
+  socket.on('disconnect', () => console.log('User disconnected:', socket.id));
+});
+
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => console.log(`Backend server running on port ${PORT}`));
+
+// backend/Procfile
+web: node server.js
+
+// backend/package.json
+{
+  "name": "video-chat-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.18.2", "socket.io": "^4.8.1", "cors": "^2.8.5" }
+}
+
+/* ========================= FRONTEND ========================= */
+// frontend/src/VideoChat.js
+import React, { useRef, useEffect, useState } from 'react';
+import io from 'socket.io-client';
+import Chat from './Chat';
+
+const socket = io(process.env.REACT_APP_BACKEND_URL || 'http://localhost:5000');
+
+export default function VideoChat({ roomId }) {
+  const localVideoRef = useRef();
+  const [remoteVideos, setRemoteVideos] = useState({});
+  const peerConnections = useRef({});
+  const servers = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+  useEffect(() => {
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+      localVideoRef.current.srcObject = stream;
+
+      socket.emit('join-room', roomId);
+
+      socket.on('user-connected', async userId => {
+        const pc = new RTCPeerConnection(servers);
+        peerConnections.current[userId] = pc;
+        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+        pc.ontrack = event => setRemoteVideos(prev => ({ ...prev, [userId]: event.streams[0] }));
+        pc.onicecandidate = e => { if(e.candidate) socket.emit('ice-candidate', { target: userId, candidate: e.candidate }); };
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('offer', { target: userId, sdp: offer, sender: socket.id });
+      });
+
+      socket.on('offer', async payload => {
+        const pc = new RTCPeerConnection(servers);
+        peerConnections.current[payload.sender] = pc;
+        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+        pc.ontrack = event => setRemoteVideos(prev => ({ ...prev, [payload.sender]: event.streams[0] }));
+        pc.onicecandidate = e => { if(e.candidate) socket.emit('ice-candidate', { target: payload.sender, candidate: e.candidate }); };
+        await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('answer', { target: payload.sender, sdp: answer });
+      });
+
+      socket.on('answer', async payload => await peerConnections.current[payload.sender].setRemoteDescription(new RTCSessionDescription(payload.sdp)));
+      socket.on('ice-candidate', candidate => peerConnections.current[candidate.sender]?.addIceCandidate(new RTCIceCandidate(candidate.candidate)));
+    });
+  }, [roomId]);
+
+  return (
+    <div className="flex flex-col md:flex-row gap-4">
+      <video ref={localVideoRef} autoPlay muted className="w-full md:w-1/3 border" />
+      <div className="flex flex-wrap gap-2 w-full md:w-2/3">
+        {Object.entries(remoteVideos).map(([id, stream]) => <video key={id} autoPlay ref={v => v && (v.srcObject = stream)} className="w-1/2 border" />)}
+      </div>
+      <Chat socket={socket} roomId={roomId} />
+    </div>
+  );
+}
+
+// frontend/.env
+REACT_APP_BACKEND_URL=https://your-backend-app.herokuapp.com
+
+// frontend/package.json (scripts section)
+"scripts": {
+  "start": "react-scripts start",
+  "build": "react-scripts build",
+  "heroku-postbuild": "npm run build"
+}
+
+/* ========================= README ========================= */
+# Multi-User Video Chat App (Deploy-Ready)
+
+## Features
+- Multi-user video/audio chat via WebRTC
+- Real-time text chat via Socket.io
+- Dynamic rooms with custom Room IDs
+- Ready to deploy: Vercel frontend + Heroku/Render backend
+
+## Setup
+### Backend (Heroku/Render)
+```bash
+cd backend
+npm install
+heroku create your-backend-app
+git push heroku main
+```
+Set environment variable `FRONTEND_URL` to your frontend deployment URL.
+
+### Frontend (Vercel)
+```bash
+cd frontend
+npm install
+vercel
+```
+Set `REACT_APP_BACKEND_URL` in `.env` to your backend deployment URL.
+
+### Running Locally
+1. Backend: `cd backend && npm install && npm start`
+2. Frontend: `cd frontend && npm install && npm start`
+Open multiple tabs at http://localhost:3000 and join the same Room ID.
